@@ -604,12 +604,24 @@ function extractUserText(msg: WAMessage): string | null {
     case "text":
       return msg.text?.body?.trim() || null;
 
-    case "interactive":
-      return (
-        msg.interactive?.button_reply?.title ||
-        msg.interactive?.list_reply?.title ||
-        null
-      );
+    case "interactive": {
+      const buttonTitle = msg.interactive?.button_reply?.title?.trim();
+      if (buttonTitle) {
+        return buttonTitle;
+      }
+
+      const listTitle = msg.interactive?.list_reply?.title?.trim();
+      if (listTitle) {
+        return listTitle;
+      }
+
+      const fallbackId =
+        msg.interactive?.button_reply?.id?.trim() ??
+        msg.interactive?.list_reply?.id?.trim() ??
+        null;
+
+      return fallbackId;
+    }
 
     case "image":
       return msg.image?.caption || "[image]";
@@ -682,8 +694,20 @@ export async function processWebhookEvent(data: MetaWebhookEvent) {
             `Handling message ${msg.id} from ${msg.from} of type ${msg.type}.`,
           );
           // ignorar si no es un mensaje entendible
+          const interactiveTitle =
+            msg.interactive?.button_reply?.title ??
+            msg.interactive?.list_reply?.title ??
+            null;
+          const interactiveId =
+            msg.interactive?.button_reply?.id ??
+            msg.interactive?.list_reply?.id ??
+            null;
+
           const textRaw = extractUserText(msg);
-          if (!textRaw) {
+          const fallbackText =
+            interactiveTitle?.trim() ?? interactiveId?.trim() ?? null;
+
+          if (!textRaw && !fallbackText) {
             console.log(
               `Ignoring message ${msg.id} (no text could be extracted).`,
             );
@@ -691,7 +715,13 @@ export async function processWebhookEvent(data: MetaWebhookEvent) {
           }
 
           const from = msg.from;
-          const text = textRaw; // no transformamos acá (executeFlow ya hace matching robusto)
+          const text = (textRaw ?? fallbackText ?? "").trim();
+          if (!text) {
+            console.log(
+              `Ignoring message ${msg.id} (resolved text is empty).`,
+            );
+            continue;
+          }
 
           const contactProfile = contactIndex.get(from);
           const contactName = contactProfile?.name ?? null;
@@ -766,15 +796,6 @@ export async function processWebhookEvent(data: MetaWebhookEvent) {
             const availableFlows = availableFlowsRaw.filter((candidate) =>
               isWhatsappChannel(candidate.channel ?? null),
             );
-
-            const interactiveTitle =
-              msg.interactive?.button_reply?.title ??
-              msg.interactive?.list_reply?.title ??
-              null;
-            const interactiveId =
-              msg.interactive?.button_reply?.id ??
-              msg.interactive?.list_reply?.id ??
-              null;
 
             flow = findBestMatchingFlow(availableFlows, {
               fullText: text,
