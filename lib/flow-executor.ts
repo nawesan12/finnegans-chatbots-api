@@ -108,6 +108,11 @@ type IncomingMessageMeta = {
     id?: string | null;
     title?: string | null;
   } | null;
+  image?: Record<string, unknown> | null;
+  video?: Record<string, unknown> | null;
+  audio?: Record<string, unknown> | null;
+  document?: Record<string, unknown> | null;
+  sticker?: Record<string, unknown> | null;
 };
 
 type InboundPayload = {
@@ -119,6 +124,11 @@ type InboundPayload = {
   interactiveId?: string | null;
   interactiveType?: string | null;
   interactiveTitle?: string | null;
+  image?: Record<string, unknown> | null;
+  video?: Record<string, unknown> | null;
+  audio?: Record<string, unknown> | null;
+  document?: Record<string, unknown> | null;
+  sticker?: Record<string, unknown> | null;
 };
 
 type FlowHistoryEntry = {
@@ -165,6 +175,7 @@ type FlowRuntimeContext = {
   lastInput?: string;
   lastInputTrimmed?: string;
   lastInputNormalized?: string;
+  lastUserMedia?: Record<string, unknown> | null;
   triggerMessage?: string;
   handoffQueue?: string;
   handoffNote?: string;
@@ -294,6 +305,11 @@ export async function executeFlow(
     interactiveId: incomingMeta?.interactive?.id ?? null,
     interactiveType: incomingMeta?.interactive?.type ?? null,
     interactiveTitle: incomingMeta?.interactive?.title ?? null,
+    image: incomingMeta?.image ?? null,
+    video: incomingMeta?.video ?? null,
+    audio: incomingMeta?.audio ?? null,
+    document: incomingMeta?.document ?? null,
+    sticker: incomingMeta?.sticker ?? null,
   };
 
   // Fast indices
@@ -357,6 +373,21 @@ export async function executeFlow(
     if (payload.interactiveTitle !== undefined) {
       historyPayload.interactiveTitle = payload.interactiveTitle;
     }
+    if (payload.image !== undefined) {
+      historyPayload.image = payload.image;
+    }
+    if (payload.video !== undefined) {
+      historyPayload.video = payload.video;
+    }
+    if (payload.audio !== undefined) {
+      historyPayload.audio = payload.audio;
+    }
+    if (payload.document !== undefined) {
+      historyPayload.document = payload.document;
+    }
+    if (payload.sticker !== undefined) {
+      historyPayload.sticker = payload.sticker;
+    }
 
     pushHistory({
       direction: "in",
@@ -389,6 +420,26 @@ export async function executeFlow(
     if (payload.interactiveTitle !== undefined) {
       context.lastInteractiveTitle = payload.interactiveTitle;
     }
+
+    const mediaPayload: Record<string, unknown> = {};
+    if (payload.image) {
+      mediaPayload.image = payload.image;
+    }
+    if (payload.video) {
+      mediaPayload.video = payload.video;
+    }
+    if (payload.audio) {
+      mediaPayload.audio = payload.audio;
+    }
+    if (payload.document) {
+      mediaPayload.document = payload.document;
+    }
+    if (payload.sticker) {
+      mediaPayload.sticker = payload.sticker;
+    }
+    context.lastUserMedia = Object.keys(mediaPayload).length
+      ? mediaPayload
+      : null;
 
     if (payload.optionIndex !== undefined) {
       context.lastSelectedOptionIndex = payload.optionIndex;

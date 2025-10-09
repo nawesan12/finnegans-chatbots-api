@@ -142,6 +142,11 @@ export type ManualFlowTriggerOptions = {
       id?: string | null;
       title?: string | null;
     } | null;
+    image?: Record<string, unknown> | null;
+    video?: Record<string, unknown> | null;
+    audio?: Record<string, unknown> | null;
+    document?: Record<string, unknown> | null;
+    sticker?: Record<string, unknown> | null;
   } | null;
 };
 
