@@ -69,10 +69,17 @@ const sanitizeIncomingMeta = (
       }
     : null;
 
+  const sanitizeMedia = (value: unknown) => (isRecord(value) ? value : null);
+
   return {
     type: typeof raw.type === "string" ? raw.type : null,
     rawText: typeof raw.rawText === "string" ? raw.rawText : null,
     interactive,
+    image: sanitizeMedia(raw.image),
+    video: sanitizeMedia(raw.video),
+    audio: sanitizeMedia(raw.audio),
+    document: sanitizeMedia(raw.document),
+    sticker: sanitizeMedia(raw.sticker),
   };
 };
 
