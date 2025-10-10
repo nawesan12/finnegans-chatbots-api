@@ -1086,10 +1086,29 @@ export async function processManualFlowTrigger(
   }
 
   const trimmedMessage = options.message?.trim();
+  const incomingRawText =
+    typeof options.incomingMeta?.rawText === "string"
+      ? options.incomingMeta.rawText.trim()
+      : null;
+  const interactiveTitle =
+    typeof options.incomingMeta?.interactive?.title === "string"
+      ? options.incomingMeta.interactive.title.trim()
+      : null;
+  const interactiveId =
+    typeof options.incomingMeta?.interactive?.id === "string"
+      ? options.incomingMeta.interactive.id.trim()
+      : null;
+
   const candidateMessage =
     trimmedMessage && trimmedMessage.length > 0
       ? trimmedMessage
-      : (options.incomingMeta?.interactive?.title?.trim() ?? null);
+      : incomingRawText && incomingRawText.length > 0
+        ? incomingRawText
+        : interactiveTitle && interactiveTitle.length > 0
+          ? interactiveTitle
+          : interactiveId && interactiveId.length > 0
+            ? interactiveId
+            : null;
 
   if (!candidateMessage) {
     return { success: false, status: 400, error: "Message text is required" };
