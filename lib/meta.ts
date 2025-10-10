@@ -798,7 +798,7 @@ export async function processWebhookEvent(data: MetaWebhookEvent) {
               where: { userId: user.id, status: "Active" },
               orderBy: { updatedAt: "desc" },
             });
-            const availableFlows = availableFlowsRaw.filter((candidate) =>
+            const availableFlows = availableFlowsRaw.filter((candidate: Flow) =>
               isWhatsappChannel(candidate.channel ?? null),
             );
 
@@ -863,6 +863,11 @@ export async function processWebhookEvent(data: MetaWebhookEvent) {
           }
 
           try {
+            const toRecord = (value: unknown): Record<string, unknown> | null =>
+              value && typeof value === "object" && !Array.isArray(value)
+                ? (value as Record<string, unknown>)
+                : null;
+
             const incomingMeta = {
               type: msg.type ?? null,
               rawText: msg.text?.body ?? textRaw ?? null,
@@ -879,11 +884,11 @@ export async function processWebhookEvent(data: MetaWebhookEvent) {
                       null,
                   }
                 : null,
-              image: msg.image ?? null,
-              video: msg.video ?? null,
-              audio: msg.audio ?? null,
-              document: msg.document ?? null,
-              sticker: msg.sticker ?? null,
+              image: toRecord(msg.image) ?? null,
+              video: toRecord(msg.video) ?? null,
+              audio: toRecord(msg.audio) ?? null,
+              document: toRecord(msg.document) ?? null,
+              sticker: toRecord(msg.sticker) ?? null,
             };
 
             if (!session) {

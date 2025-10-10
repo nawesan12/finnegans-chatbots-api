@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
-    "moduleResolution": "NodeNext",
+    "moduleResolution": "Node",
     "outDir": "dist",
     "rootDir": "./",
     "allowSyntheticDefaultImports": true,
@@ -15,7 +15,8 @@
   },
   "include": [
     "index.ts",
-    "lib/**/*.ts"
+    "lib/**/*.ts",
+    "types/**/*.d.ts"
   ],
   "exclude": [
     "node_modules",
