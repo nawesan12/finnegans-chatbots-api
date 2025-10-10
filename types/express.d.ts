@@ -68,6 +68,15 @@ declare module "express" {
       path: string,
       ...handlers: RequestHandler<Params, ResBody, ReqBody, ReqQuery>[]
     ): this;
+    put<
+      Params = Record<string, string>,
+      ResBody = unknown,
+      ReqBody = Record<string, unknown> | undefined,
+      ReqQuery = Record<string, unknown>,
+    >(
+      path: string,
+      ...handlers: RequestHandler<Params, ResBody, ReqBody, ReqQuery>[]
+    ): this;
     listen(port: number, callback?: () => void): unknown;
   }
 
