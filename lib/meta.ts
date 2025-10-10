@@ -199,10 +199,29 @@ const normalizePhone = (value?: string | null): string | null => {
   return digits.length ? digits : null;
 };
 
+const isPrismaError = (value: unknown, code: string): boolean => {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as { code?: unknown };
+  return typeof candidate.code === "string" && candidate.code === code;
+};
+
 type FlowMatchContext = {
   fullText: string | null;
   interactiveTitle: string | null;
   interactiveId: string | null;
+};
+
+const toRecordIfObject = (
+  value: unknown,
+): Record<string, unknown> | null => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  return value as Record<string, unknown>;
 };
 
 const collectKeywordCandidates = (
@@ -523,6 +542,313 @@ async function recordSessionSnapshot(sessionId: string) {
   }
 }
 
+type ContactResolutionOptions = {
+  name?: string | null;
+  alternatePhones?: string[];
+};
+
+async function getOrCreateContactForUser(
+  userId: string,
+  phone: string,
+  options: ContactResolutionOptions = {},
+): Promise<Contact> {
+  const trimmedPrimary = phone.trim();
+  const normalizedPrimary = normalizePhone(trimmedPrimary) ?? trimmedPrimary;
+
+  const searchPhones = new Set<string>();
+  if (normalizedPrimary) {
+    searchPhones.add(normalizedPrimary);
+  }
+  if (trimmedPrimary && trimmedPrimary !== normalizedPrimary) {
+    searchPhones.add(trimmedPrimary);
+  }
+
+  for (const candidate of options.alternatePhones ?? []) {
+    if (typeof candidate !== "string") continue;
+    const trimmedCandidate = candidate.trim();
+    if (!trimmedCandidate) continue;
+    const normalizedCandidate =
+      normalizePhone(trimmedCandidate) ?? trimmedCandidate;
+    searchPhones.add(normalizedCandidate);
+    if (normalizedCandidate !== trimmedCandidate) {
+      searchPhones.add(trimmedCandidate);
+    }
+  }
+
+  const searchList = Array.from(searchPhones).filter((value) => value.length);
+  if (!searchList.length) {
+    throw new Error("Unable to resolve contact phone number");
+  }
+
+  const canonicalPhone = normalizedPrimary || searchList[0];
+
+  let contact = await prisma.contact.findFirst({
+    where: {
+      userId,
+      OR: searchList.map((value) => ({ phone: value })),
+    },
+  });
+
+  const normalizedName =
+    typeof options.name === "string" && options.name.trim().length
+      ? options.name.trim()
+      : null;
+
+  if (!contact) {
+    try {
+      contact = await prisma.contact.create({
+        data: {
+          userId,
+          phone: canonicalPhone,
+          ...(normalizedName ? { name: normalizedName } : {}),
+        },
+      });
+    } catch (error) {
+      if (isPrismaError(error, "P2002")) {
+        contact = await prisma.contact.findFirst({
+          where: {
+            userId,
+            OR: searchList.map((value) => ({ phone: value })),
+          },
+        });
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  if (!contact) {
+    throw new Error("Failed to resolve contact for user");
+  }
+
+  if (contact.phone !== canonicalPhone) {
+    try {
+      contact = await prisma.contact.update({
+        where: { id: contact.id },
+        data: { phone: canonicalPhone },
+      });
+    } catch (error) {
+      console.error("Failed to normalize contact phone", contact.id, error);
+    }
+  }
+
+  if (normalizedName && contact.name?.trim() !== normalizedName) {
+    try {
+      contact = await prisma.contact.update({
+        where: { id: contact.id },
+        data: { name: normalizedName },
+      });
+    } catch (error) {
+      console.error("Failed to update contact name", contact.id, error);
+    }
+  }
+
+  return contact;
+}
+
+async function ensureActiveSessionForFlow(
+  contact: Contact,
+  flow: Flow,
+): Promise<SessionWithRelations> {
+  let session = (await prisma.session.findUnique({
+    where: { contactId_flowId: { contactId: contact.id, flowId: flow.id } },
+    include: { flow: true, contact: true },
+  })) as SessionWithRelations | null;
+
+  if (!session) {
+    session = (await prisma.session.create({
+      data: { contactId: contact.id, flowId: flow.id, status: "Active" },
+      include: { flow: true, contact: true },
+    })) as SessionWithRelations;
+    return session;
+  }
+
+  if (session.status === "Completed" || session.status === "Errored") {
+    session = (await prisma.session.update({
+      where: { id: session.id },
+      data: { status: "Active", currentNodeId: null, context: {} },
+      include: { flow: true, contact: true },
+    })) as SessionWithRelations;
+  } else if (!session.flow || !session.contact) {
+    session = (await prisma.session.findUnique({
+      where: { id: session.id },
+      include: { flow: true, contact: true },
+    })) as SessionWithRelations | null;
+
+    if (!session) {
+      session = (await prisma.session.create({
+        data: { contactId: contact.id, flowId: flow.id, status: "Active" },
+        include: { flow: true, contact: true },
+      })) as SessionWithRelations;
+    }
+  }
+
+  return session;
+}
+
+async function handleIncomingWhatsappMessage(
+  userId: string,
+  message: WAMessage,
+  contactProfile: ContactIndexEntry | undefined,
+) {
+  const fromRaw = typeof message.from === "string" ? message.from : "";
+  const from = fromRaw.trim();
+  console.log(
+    `Handling message ${message.id} from ${fromRaw || "unknown"} of type ${
+      message.type
+    }.`,
+  );
+  if (!from) {
+    console.error("Received WhatsApp message without sender identifier.");
+    return;
+  }
+
+  const interactiveTitle =
+    message.interactive?.button_reply?.title ??
+    message.interactive?.list_reply?.title ??
+    null;
+  const interactiveId =
+    message.interactive?.button_reply?.id ??
+    message.interactive?.list_reply?.id ??
+    null;
+
+  const textRaw = extractUserText(message);
+  const fallbackText = interactiveTitle?.trim() ?? interactiveId?.trim() ?? null;
+
+  if (!textRaw && !fallbackText) {
+    console.log(
+      `Ignoring message ${message.id} (no text could be extracted).`,
+    );
+    return;
+  }
+
+  const text = (textRaw ?? fallbackText ?? "").trim();
+  if (!text) {
+    console.log(`Ignoring message ${message.id} (resolved text is empty).`);
+    return;
+  }
+
+  let contact: Contact;
+  try {
+    contact = await getOrCreateContactForUser(userId, from, {
+      name: contactProfile?.name ?? null,
+    });
+  } catch (error) {
+    console.error(`Failed to resolve contact for phone ${from}:`, error);
+    return;
+  }
+
+  const existingSession = (await prisma.session.findFirst({
+    where: {
+      contactId: contact.id,
+      status: { in: ["Active", "Paused"] },
+    },
+    include: { flow: true, contact: true },
+    orderBy: { updatedAt: "desc" },
+  })) as SessionWithRelations | null;
+
+  let session: SessionWithRelations | null =
+    existingSession && isWhatsappChannel(existingSession.flow?.channel ?? null)
+      ? existingSession
+      : null;
+
+  let flow = session?.flow ?? null;
+
+  if (!flow) {
+    const availableFlowsRaw = await prisma.flow.findMany({
+      where: { userId, status: "Active" },
+      orderBy: { updatedAt: "desc" },
+    });
+    const availableFlows = availableFlowsRaw.filter((candidate: Flow) =>
+      isWhatsappChannel(candidate.channel ?? null),
+    );
+
+    flow = findBestMatchingFlow(availableFlows, {
+      fullText: text,
+      interactiveTitle,
+      interactiveId,
+    });
+
+    if (!flow) {
+      console.error(
+        `No active flow found for user ${userId} to handle message ${message.id}.`,
+      );
+      return;
+    }
+  }
+
+  try {
+    session = await ensureActiveSessionForFlow(contact, flow);
+  } catch (error) {
+    console.error(
+      `Failed to create or resume session for contact ${contact.id}:`,
+      error,
+    );
+    return;
+  }
+
+  if (!session) {
+    console.error(
+      `Session could not be resolved for contact ${contact.id}, skipping flow execution.`,
+    );
+    return;
+  }
+
+  const incomingMeta = {
+    type: message.type ?? null,
+    rawText: message.text?.body ?? textRaw ?? null,
+    interactive: message.interactive
+      ? {
+          type: message.interactive.type ?? null,
+          id:
+            message.interactive.button_reply?.id ??
+            message.interactive.list_reply?.id ??
+            null,
+          title:
+            message.interactive.button_reply?.title ??
+            message.interactive.list_reply?.title ??
+            null,
+        }
+      : null,
+    image: toRecordIfObject(message.image),
+    video: toRecordIfObject(message.video),
+    audio: toRecordIfObject(message.audio),
+    document: toRecordIfObject(message.document),
+    sticker: toRecordIfObject(message.sticker),
+  };
+
+  try {
+    await executeFlow(
+      session,
+      text,
+      (uid, to, payload) => sendMessage(uid, to, payload),
+      incomingMeta,
+    );
+  } catch (error) {
+    console.error(`Error executing flow for message ${message.id}:`, error);
+    try {
+      await prisma.session.update({
+        where: { id: session.id },
+        data: { status: "Errored" },
+      });
+    } catch (updateError) {
+      console.error(
+        `Failed to mark session ${session.id} as errored after execution failure:`,
+        updateError,
+      );
+    }
+  } finally {
+    try {
+      await recordSessionSnapshot(session.id);
+    } catch (snapshotError) {
+      console.error(
+        `Failed to record session snapshot for ${session.id}:`,
+        snapshotError,
+      );
+    }
+  }
+}
+
 async function processBroadcastStatuses(userId: string, statuses: WAStatus[]) {
   for (const status of statuses) {
     if (!status) continue;
@@ -695,228 +1021,8 @@ export async function processWebhookEvent(data: MetaWebhookEvent) {
       // Procesamos cada mensaje (Meta puede agruparlos)
       for (const msg of messages) {
         try {
-          console.log(
-            `Handling message ${msg.id} from ${msg.from} of type ${msg.type}.`,
-          );
-          // ignorar si no es un mensaje entendible
-          const interactiveTitle =
-            msg.interactive?.button_reply?.title ??
-            msg.interactive?.list_reply?.title ??
-            null;
-          const interactiveId =
-            msg.interactive?.button_reply?.id ??
-            msg.interactive?.list_reply?.id ??
-            null;
-
-          const textRaw = extractUserText(msg);
-          const fallbackText =
-            interactiveTitle?.trim() ?? interactiveId?.trim() ?? null;
-
-          if (!textRaw && !fallbackText) {
-            console.log(
-              `Ignoring message ${msg.id} (no text could be extracted).`,
-            );
-            continue;
-          }
-
-          const from = msg.from;
-          const text = (textRaw ?? fallbackText ?? "").trim();
-          if (!text) {
-            console.log(
-              `Ignoring message ${msg.id} (resolved text is empty).`,
-            );
-            continue;
-          }
-
-          const contactProfile = contactIndex.get(from);
-          const contactName = contactProfile?.name ?? null;
-
-          // Contacto: upsert seguro para ese usuario
-          let contact = await prisma.contact.findFirst({
-            where: { phone: from, userId: user.id },
-          });
-          if (!contact) {
-            console.log(`Creating new contact for phone ${from}.`);
-            contact = await prisma.contact.create({
-              data: {
-                phone: from,
-                userId: user.id,
-                ...(contactName ? { name: contactName } : {}),
-              },
-            });
-          } else {
-            console.log(
-              `Found existing contact ${contact.id} for phone ${from}.`,
-            );
-            if (contactName) {
-              const existingName = contact.name?.trim();
-              if (existingName !== contactName) {
-                try {
-                  console.log(
-                    `Updating contact ${contact.id} name to "${contactName}".`,
-                  );
-                  contact = await prisma.contact.update({
-                    where: { id: contact.id },
-                    data: { name: contactName },
-                  });
-                } catch (error) {
-                  console.error(
-                    `Failed to update contact name for ${from}:`,
-                    error,
-                  );
-                }
-              }
-            }
-          }
-
-          const existingSession = (await prisma.session.findFirst({
-            where: {
-              contactId: contact.id,
-              status: { in: ["Active", "Paused"] },
-            },
-            include: { flow: true, contact: true },
-            orderBy: { updatedAt: "desc" },
-          })) as SessionWithRelations | null;
-
-          let session: SessionWithRelations | null =
-            existingSession &&
-            isWhatsappChannel(existingSession.flow?.channel ?? null)
-              ? existingSession
-              : null;
-
-          let flow = session?.flow ?? null;
-
-          if (flow) {
-            console.log(
-              `Resuming session ${session?.id} with flow ${flow.id} ("${flow.name}").`,
-            );
-          } else {
-            console.log(
-              "No active session found, attempting to match a new flow.",
-            );
-            const availableFlowsRaw = await prisma.flow.findMany({
-              where: { userId: user.id, status: "Active" },
-              orderBy: { updatedAt: "desc" },
-            });
-            const availableFlows = availableFlowsRaw.filter((candidate: Flow) =>
-              isWhatsappChannel(candidate.channel ?? null),
-            );
-
-            flow = findBestMatchingFlow(availableFlows, {
-              fullText: text,
-              interactiveTitle,
-              interactiveId,
-            });
-
-            if (flow) {
-              console.log(
-                `Matched new flow ${flow.id} ("${flow.name}") for message ${msg.id}.`,
-              );
-            }
-          }
-
-          if (!flow) {
-            console.error(
-              `No active flow found for user ${user.id} to handle message ${msg.id}.`,
-            );
-            continue;
-          }
-
-          if (!session || session.flowId !== flow.id) {
-            session = (await prisma.session.findUnique({
-              where: {
-                contactId_flowId: { contactId: contact.id, flowId: flow.id },
-              },
-              include: { flow: true, contact: true },
-            })) as SessionWithRelations | null;
-          }
-
-          if (!session) {
-            console.log(
-              `Creating new session for contact ${contact.id} and flow ${flow.id}.`,
-            );
-            session = (await prisma.session.create({
-              data: {
-                contactId: contact.id,
-                flowId: flow.id,
-                status: "Active",
-              },
-              include: { flow: true, contact: true },
-            })) as SessionWithRelations;
-          } else if (
-            session.status === "Completed" ||
-            session.status === "Errored"
-          ) {
-            console.log(
-              `Resetting completed/errored session ${session.id} to active.`,
-            );
-            session = (await prisma.session.update({
-              where: { id: session.id },
-              data: { status: "Active", currentNodeId: null, context: {} },
-              include: { flow: true, contact: true },
-            })) as SessionWithRelations;
-          } else if (!session.flow || !session.contact) {
-            session = (await prisma.session.findUnique({
-              where: { id: session.id },
-              include: { flow: true, contact: true },
-            })) as SessionWithRelations | null;
-          }
-
-          try {
-            const toRecord = (value: unknown): Record<string, unknown> | null =>
-              value && typeof value === "object" && !Array.isArray(value)
-                ? (value as Record<string, unknown>)
-                : null;
-
-            const incomingMeta = {
-              type: msg.type ?? null,
-              rawText: msg.text?.body ?? textRaw ?? null,
-              interactive: msg.interactive
-                ? {
-                    type: msg.interactive.type ?? null,
-                    id:
-                      msg.interactive.button_reply?.id ??
-                      msg.interactive.list_reply?.id ??
-                      null,
-                    title:
-                      msg.interactive.button_reply?.title ??
-                      msg.interactive.list_reply?.title ??
-                      null,
-                  }
-                : null,
-              image: toRecord(msg.image) ?? null,
-              video: toRecord(msg.video) ?? null,
-              audio: toRecord(msg.audio) ?? null,
-              document: toRecord(msg.document) ?? null,
-              sticker: toRecord(msg.sticker) ?? null,
-            };
-
-            if (!session) {
-              console.error(
-                `Session could not be resolved for contact ${contact.id}, skipping flow execution.`,
-              );
-              continue;
-            }
-
-            await executeFlow(
-              session,
-              text,
-              (uid, to, payload) => sendMessage(uid, to, payload),
-              incomingMeta,
-            );
-          } catch (err) {
-            console.error(`Error executing flow for message ${msg.id}:`, err);
-            if (session) {
-              await prisma.session.update({
-                where: { id: session.id },
-                data: { status: "Errored" },
-              });
-            }
-          } finally {
-            if (session) {
-              await recordSessionSnapshot(session.id);
-            }
-          }
+          const profile = msg.from ? contactIndex.get(msg.from) : undefined;
+          await handleIncomingWhatsappMessage(user.id, msg, profile);
         } catch (error) {
           console.error(`Unhandled error processing message ${msg.id}:`, error);
         }
@@ -973,74 +1079,39 @@ export async function processManualFlowTrigger(
     return { success: false, status: 400, error: "Message text is required" };
   }
 
-  const lookupPhones = [normalizedPhone];
-  if (rawPhone && rawPhone !== normalizedPhone) {
-    lookupPhones.push(rawPhone);
-  }
-
-  let contact = await prisma.contact.findFirst({
-    where: {
-      userId: flow.userId,
-      OR: lookupPhones.map((value) => ({ phone: value })),
-    },
-  });
-
-  if (!contact) {
-    contact = await prisma.contact.create({
-      data: {
-        phone: normalizedPhone,
-        userId: flow.userId,
-        ...(options.name ? { name: options.name } : {}),
-      },
+  let contact: Contact;
+  try {
+    const alternates =
+      rawPhone && rawPhone !== normalizedPhone ? [rawPhone] : [];
+    contact = await getOrCreateContactForUser(flow.userId, normalizedPhone, {
+      alternatePhones: alternates,
+      name: options.name ?? null,
     });
-  } else {
-    if (contact.phone !== normalizedPhone) {
-      try {
-        contact = await prisma.contact.update({
-          where: { id: contact.id },
-          data: { phone: normalizedPhone },
-        });
-      } catch (error) {
-        console.error("Failed to normalize contact phone", contact.id, error);
-      }
-    }
-
-    if (options.name) {
-      const currentName = contact.name?.trim();
-      if (currentName !== options.name) {
-        try {
-          contact = await prisma.contact.update({
-            where: { id: contact.id },
-            data: { name: options.name },
-          });
-        } catch (error) {
-          console.error("Failed to update contact name", contact.id, error);
-        }
-      }
-    }
+  } catch (error) {
+    console.error(
+      `Failed to resolve contact for manual trigger on flow ${flow.id}:`,
+      error,
+    );
+    return {
+      success: false,
+      status: 500,
+      error: "Failed to resolve contact",
+    };
   }
 
-  let session = (await prisma.session.findUnique({
-    where: { contactId_flowId: { contactId: contact.id, flowId: flow.id } },
-    include: { flow: true, contact: true },
-  })) as SessionWithRelations | null;
-
-  if (!session) {
-    session = (await prisma.session.create({
-      data: { contactId: contact.id, flowId: flow.id, status: "Active" },
-      include: { flow: true, contact: true },
-    })) as SessionWithRelations;
-  } else if (session.status === "Completed" || session.status === "Errored") {
-    session = (await prisma.session.update({
-      where: { id: session.id },
-      data: { status: "Active", currentNodeId: null, context: {} },
-      include: { flow: true, contact: true },
-    })) as SessionWithRelations;
-  } else if (!session.flow || !session.contact) {
-    session = (await prisma.session.findUnique({
-      where: { id: session.id },
-      include: { flow: true, contact: true },
-    })) as SessionWithRelations | null;
+  let session: SessionWithRelations | null = null;
+  try {
+    session = await ensureActiveSessionForFlow(contact, flow);
+  } catch (error) {
+    console.error(
+      `Failed to initialise session for contact ${contact.id} on flow ${flow.id}:`,
+      error,
+    );
+    return {
+      success: false,
+      status: 500,
+      error: "Unable to initialise session",
+    };
   }
 
   if (!session) {
@@ -1051,30 +1122,34 @@ export async function processManualFlowTrigger(
     };
   }
 
+  let activeSession: SessionWithRelations = session;
+
   const variables = options.variables;
   if (variables && Object.keys(variables).length > 0) {
     const currentContext =
-      (session.context as Record<string, unknown> | null) ?? {};
+      (activeSession.context as Record<string, unknown> | null) ?? {};
     const nextContext = {
       ...currentContext,
       ...variables,
     } as Prisma.JsonObject;
-    session = (await prisma.session.update({
-      where: { id: session.id },
+    activeSession = (await prisma.session.update({
+      where: { id: activeSession.id },
       data: { context: nextContext },
       include: { flow: true, contact: true },
     })) as SessionWithRelations;
   }
 
-  const incomingMeta = options.incomingMeta ?? {
-    type: "text",
-    rawText: candidateMessage,
-    interactive: null,
-  };
+  const incomingMeta =
+    options.incomingMeta ??
+    ({
+      type: "text",
+      rawText: candidateMessage,
+      interactive: null,
+    } as ManualFlowTriggerOptions["incomingMeta"]);
 
   try {
     await executeFlow(
-      session,
+      activeSession,
       candidateMessage,
       (uid, to, payload) => sendMessage(uid, to, payload),
       incomingMeta,
@@ -1084,13 +1159,13 @@ export async function processManualFlowTrigger(
       success: true,
       flowId: flow.id,
       contactId: contact.id,
-      sessionId: session.id,
+      sessionId: activeSession.id,
     };
   } catch (error) {
     console.error("Manual flow trigger execution failed:", error);
     try {
       await prisma.session.update({
-        where: { id: session.id },
+        where: { id: activeSession.id },
         data: { status: "Errored" },
       });
     } catch (updateError) {
@@ -1107,7 +1182,7 @@ export async function processManualFlowTrigger(
     return { success: false, status: statusCode, error: errorMessage };
   } finally {
     try {
-      await recordSessionSnapshot(session.id);
+      await recordSessionSnapshot(activeSession.id);
     } catch (snapshotError) {
       console.error("Failed to record manual session snapshot:", snapshotError);
     }
