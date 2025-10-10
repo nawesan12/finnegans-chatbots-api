@@ -6,8 +6,17 @@ import {
 } from "./lib/meta";
 import type {
   ManualFlowTriggerOptions,
+  ManualFlowTriggerResult,
   MetaWebhookEvent,
 } from "./lib/meta";
+
+type ManualFlowTriggerRequestBody = {
+  from?: string;
+  message?: string;
+  name?: string;
+  variables?: Record<string, unknown>;
+  incomingMeta?: ManualFlowTriggerOptions["incomingMeta"];
+};
 
 const app = express();
 
@@ -20,7 +29,7 @@ const VERIFY_TOKEN =
   process.env.VERIFY_TOKEN ??
   "";
 
-app.get("/health", (_req, res) => {
+app.get("/health", (_req: Request, res: Response) => {
   res.json({ status: "ok" });
 });
 
@@ -100,33 +109,65 @@ app.post("/meta/webhook", async (req: Request, res: Response) => {
   }
 });
 
-app.post("/flows/:flowId/trigger", async (req: Request, res: Response) => {
+app.post<
+  { flowId: string },
+  ManualFlowTriggerResult,
+  ManualFlowTriggerRequestBody
+>(
+  "/flows/:flowId/trigger",
+  async (
+    req: Request<
+      { flowId: string },
+      ManualFlowTriggerResult,
+      ManualFlowTriggerRequestBody
+    >,
+    res: Response<ManualFlowTriggerResult>,
+  ) => {
   const { flowId } = req.params;
 
   if (!flowId) {
-    res.status(400).json({ error: "Flow ID is required" });
+    res
+      .status(400)
+      .json({ success: false, error: "Flow ID is required", status: 400 });
     return;
   }
 
-  const { from, message, name, variables, incomingMeta } = req.body ?? {};
+  const { from, message, name, variables, incomingMeta } =
+    req.body ?? {};
 
   if (typeof from !== "string" || !from.trim()) {
-    res.status(400).json({ error: 'Field "from" must be a non-empty string' });
+    res.status(400).json({
+      success: false,
+      error: 'Field "from" must be a non-empty string',
+      status: 400,
+    });
     return;
   }
 
   if (typeof message !== "string" && typeof message !== "undefined") {
-    res.status(400).json({ error: 'Field "message" must be a string' });
+    res.status(400).json({
+      success: false,
+      error: 'Field "message" must be a string',
+      status: 400,
+    });
     return;
   }
 
   if (typeof name !== "undefined" && typeof name !== "string") {
-    res.status(400).json({ error: 'Field "name" must be a string when provided' });
+    res.status(400).json({
+      success: false,
+      error: 'Field "name" must be a string when provided',
+      status: 400,
+    });
     return;
   }
 
   if (typeof variables !== "undefined" && !isRecord(variables)) {
-    res.status(400).json({ error: 'Field "variables" must be an object when provided' });
+    res.status(400).json({
+      success: false,
+      error: 'Field "variables" must be an object when provided',
+      status: 400,
+    });
     return;
   }
 
@@ -150,9 +191,14 @@ app.post("/flows/:flowId/trigger", async (req: Request, res: Response) => {
     res.status(result.status ?? 500).json(result);
   } catch (error) {
     console.error("Failed to trigger flow manually:", error);
-    res.status(500).json({ error: "Failed to trigger flow" });
+    res.status(500).json({
+      success: false,
+      error: "Failed to trigger flow",
+      status: 500,
+    });
   }
-});
+  },
+);
 
 // Generic error handler
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
