@@ -264,6 +264,12 @@ const findBestMatchingFlow = (flows: Flow[], context: FlowMatchContext) => {
   let bestScore = -1;
   let bestUpdatedAt = 0;
 
+  const toTimestamp = (value: Date | string) => {
+    const result =
+      value instanceof Date ? value.getTime() : new Date(value).getTime();
+    return Number.isFinite(result) ? result : 0;
+  };
+
   for (const flow of flows) {
     const normalizedTrigger = normalizeTrigger(flow.trigger);
     const isDefaultTrigger = normalizedTrigger === DEFAULT_TRIGGER;
@@ -309,10 +315,7 @@ const findBestMatchingFlow = (flows: Flow[], context: FlowMatchContext) => {
       continue;
     }
 
-    const updatedAt =
-      flow.updatedAt instanceof Date
-        ? flow.updatedAt.getTime()
-        : new Date(flow.updatedAt).getTime();
+    const updatedAt = toTimestamp(flow.updatedAt);
 
     if (
       score > bestScore ||
@@ -326,6 +329,14 @@ const findBestMatchingFlow = (flows: Flow[], context: FlowMatchContext) => {
 
   if (bestFlow) {
     return bestFlow;
+  }
+
+  const defaultFlows = flows
+    .filter((flow) => normalizeTrigger(flow.trigger) === DEFAULT_TRIGGER)
+    .sort((a, b) => toTimestamp(b.updatedAt) - toTimestamp(a.updatedAt));
+
+  if (defaultFlows.length) {
+    return defaultFlows[0];
   }
 
   return flows[0] ?? null;
@@ -753,6 +764,11 @@ async function handleIncomingWhatsappMessage(
       : null;
 
   let flow = session?.flow ?? null;
+
+  if (flow && flow.status !== "Active") {
+    session = null;
+    flow = null;
+  }
 
   if (!flow) {
     const availableFlowsRaw = await prisma.flow.findMany({
