@@ -1,4 +1,5 @@
 import express, { type Request, type Response, type NextFunction } from "express";
+import { ZodError } from "zod";
 
 import {
   processWebhookEvent,
@@ -9,6 +10,15 @@ import type {
   ManualFlowTriggerResult,
   MetaWebhookEvent,
 } from "./lib/meta";
+import {
+  createFlowForUser,
+  getFlowById,
+  updateFlowById,
+  FlowValidationError,
+  type FlowCreateInput,
+  type FlowResource,
+  type FlowUpdateInput,
+} from "./lib/flow-service";
 
 type ManualFlowTriggerRequestBody = {
   from?: string;
@@ -17,6 +27,9 @@ type ManualFlowTriggerRequestBody = {
   variables?: Record<string, unknown>;
   incomingMeta?: ManualFlowTriggerOptions["incomingMeta"];
 };
+
+type FlowSuccessResponse = { success: true; flow: FlowResource };
+type FlowErrorResponse = { success: false; error: string };
 
 const app = express();
 
@@ -92,6 +105,46 @@ const sanitizeIncomingMeta = (
   };
 };
 
+const isPrismaError = (value: unknown, code: string): boolean => {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as { code?: unknown };
+  return typeof candidate.code === "string" && candidate.code === code;
+};
+
+const handleFlowRouteError = (
+  error: unknown,
+  res: Response<FlowErrorResponse>,
+  action: string,
+) => {
+  if (error instanceof ZodError) {
+    const message =
+      error.issues?.[0]?.message ??
+      error.message ??
+      "Invalid flow payload";
+    res.status(400).json({ success: false, error: message });
+    return;
+  }
+
+  if (error instanceof FlowValidationError) {
+    res.status(error.status).json({ success: false, error: error.message });
+    return;
+  }
+
+  if (isPrismaError(error, "P2002")) {
+    res.status(409).json({
+      success: false,
+      error: "A flow with the provided Meta Flow ID already exists",
+    });
+    return;
+  }
+
+  console.error(`Failed to ${action}:`, error);
+  res.status(500).json({ success: false, error: "Failed to persist flow" });
+};
+
 app.post("/meta/webhook", async (req: Request, res: Response) => {
   const payload = req.body as MetaWebhookEvent | undefined;
 
@@ -106,6 +159,60 @@ app.post("/meta/webhook", async (req: Request, res: Response) => {
   } catch (error) {
     console.error("Failed to process webhook event:", error);
     res.status(500).json({ error: "Failed to process webhook event" });
+  }
+});
+
+app.get<{ flowId: string }, FlowSuccessResponse | FlowErrorResponse>(
+  "/flows/:flowId",
+  async (req, res) => {
+    const { flowId } = req.params;
+
+    try {
+      const flow = await getFlowById(flowId);
+      if (!flow) {
+        res.status(404).json({ success: false, error: "Flow not found" });
+        return;
+      }
+
+      res.json({ success: true, flow });
+    } catch (error) {
+      handleFlowRouteError(error, res, "retrieve flow");
+    }
+  },
+);
+
+app.post<
+  { userId: string },
+  FlowSuccessResponse | FlowErrorResponse,
+  FlowCreateInput
+>("/users/:userId/flows", async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    const flow = await createFlowForUser(userId, req.body);
+    res.status(201).json({ success: true, flow });
+  } catch (error) {
+    handleFlowRouteError(error, res, "create flow");
+  }
+});
+
+app.put<
+  { flowId: string },
+  FlowSuccessResponse | FlowErrorResponse,
+  FlowUpdateInput
+>("/flows/:flowId", async (req, res) => {
+  const { flowId } = req.params;
+
+  try {
+    const flow = await updateFlowById(flowId, req.body);
+    if (!flow) {
+      res.status(404).json({ success: false, error: "Flow not found" });
+      return;
+    }
+
+    res.json({ success: true, flow });
+  } catch (error) {
+    handleFlowRouteError(error, res, "update flow");
   }
 });
 
