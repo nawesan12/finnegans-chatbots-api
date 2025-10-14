@@ -1,7 +1,12 @@
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 
-import { sanitizeFlowDefinition, type FlowDefinition } from "./flow-schema";
+import {
+  FlowSanitizationError,
+  emptyFlowDefinition,
+  sanitizeFlowDefinition,
+  type FlowDefinition,
+} from "./flow-schema";
 import prisma from "./prisma";
 
 export class FlowValidationError extends Error {
@@ -179,25 +184,41 @@ const toIsoString = (value: Date | string): string => {
   return new Date().toISOString();
 };
 
-const toFlowResource = (flow: FlowRecord): FlowResource => ({
-  id: flow.id,
-  userId: flow.userId,
-  name: flow.name,
-  trigger: flow.trigger,
-  status: flow.status,
-  channel: flow.channel,
-  definition: sanitizeFlowDefinition(flow.definition),
-  metaFlow: {
-    id: flow.metaFlowId ?? null,
-    token: flow.metaFlowToken ?? null,
-    version: flow.metaFlowVersion ?? null,
-    revisionId: flow.metaFlowRevisionId ?? null,
-    status: flow.metaFlowStatus ?? null,
-    metadata: cloneJson(flow.metaFlowMetadata ?? null),
-  },
-  createdAt: toIsoString(flow.createdAt),
-  updatedAt: toIsoString(flow.updatedAt),
-});
+const toFlowResource = (flow: FlowRecord): FlowResource => {
+  let definition: FlowDefinition;
+  try {
+    definition = sanitizeFlowDefinition(flow.definition);
+  } catch (error) {
+    if (error instanceof FlowSanitizationError) {
+      console.warn(
+        `Failed to sanitize flow definition for flow ${flow.id}: ${error.message}`,
+      );
+      definition = emptyFlowDefinition;
+    } else {
+      throw error;
+    }
+  }
+
+  return {
+    id: flow.id,
+    userId: flow.userId,
+    name: flow.name,
+    trigger: flow.trigger,
+    status: flow.status,
+    channel: flow.channel,
+    definition,
+    metaFlow: {
+      id: flow.metaFlowId ?? null,
+      token: flow.metaFlowToken ?? null,
+      version: flow.metaFlowVersion ?? null,
+      revisionId: flow.metaFlowRevisionId ?? null,
+      status: flow.metaFlowStatus ?? null,
+      metadata: cloneJson(flow.metaFlowMetadata ?? null),
+    },
+    createdAt: toIsoString(flow.createdAt),
+    updatedAt: toIsoString(flow.updatedAt),
+  };
+};
 
 const prepareMetaFlowCreate = (payload?: MetaFlowUpsertInput) => {
   if (!payload) {
@@ -292,7 +313,15 @@ export async function createFlowForUser(
   const normalizedUserId = await ensureUserExists(userId);
 
   const parsed = flowCreateSchema.parse(payload ?? {});
-  const sanitizedDefinition = sanitizeFlowDefinition(parsed.definition);
+  let sanitizedDefinition: FlowDefinition;
+  try {
+    sanitizedDefinition = sanitizeFlowDefinition(parsed.definition);
+  } catch (error) {
+    if (error instanceof FlowSanitizationError) {
+      throw new FlowValidationError(error.message, 400);
+    }
+    throw error;
+  }
   const definitionValue = toJsonValue(sanitizedDefinition);
 
   const data: Record<string, unknown> = {
@@ -338,7 +367,16 @@ export async function updateFlowById(
     data.channel = parsed.channel;
   }
   if (hasOwn(parsed, "definition")) {
-    data.definition = toJsonValue(sanitizeFlowDefinition(parsed.definition));
+    let sanitizedDefinition: FlowDefinition;
+    try {
+      sanitizedDefinition = sanitizeFlowDefinition(parsed.definition);
+    } catch (error) {
+      if (error instanceof FlowSanitizationError) {
+        throw new FlowValidationError(error.message, 400);
+      }
+      throw error;
+    }
+    data.definition = toJsonValue(sanitizedDefinition);
   }
 
   const metaFlowUpdate = prepareMetaFlowUpdate(parsed.metaFlow);
