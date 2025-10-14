@@ -1283,11 +1283,124 @@ export type SendMessageResult =
 export const GRAPH_VERSION = "v23.0";
 export const META_API_TIMEOUT_MS = 15000;
 
+type SendMessageOptions = {
+  allowListAttempted?: boolean;
+};
+
+type MetaErrorPayload = {
+  error?: {
+    message?: string;
+    error_user_msg?: string;
+    code?: number;
+    error_subcode?: number;
+  };
+};
+
+type AllowListResult =
+  | { success: true; details?: unknown }
+  | { success: false; status?: number; error?: string; details?: unknown };
+
+const RECIPIENT_NOT_ALLOWED_ERROR_CODE = 131030;
+
+async function addRecipientToAllowList(
+  accessToken: string,
+  phoneNumberId: string,
+  recipientPhone: string,
+): Promise<AllowListResult> {
+  const url = `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/recipients`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), META_API_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: recipientPhone,
+      }),
+      signal: controller.signal,
+    });
+
+    const raw = await response.text().catch(() => "");
+    let json: unknown;
+
+    if (raw) {
+      try {
+        json = JSON.parse(raw);
+      } catch {
+        json = undefined;
+      }
+    }
+
+    if (!response.ok) {
+      const payload = json as MetaErrorPayload | undefined;
+      const message =
+        payload?.error?.error_user_msg?.trim() ||
+        payload?.error?.message?.trim() ||
+        raw ||
+        response.statusText ||
+        "Failed to add phone number to WhatsApp test allow list";
+
+      console.error(
+        "Failed to add phone number to WhatsApp allow list:",
+        response.status,
+        message,
+      );
+
+      return {
+        success: false,
+        status: response.status,
+        error: message,
+        details: payload ?? json ?? raw,
+      };
+    }
+
+    console.info(
+      "Successfully added phone number to WhatsApp allow list:",
+      recipientPhone,
+    );
+
+    return { success: true, details: json ?? raw };
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      console.error(
+        "Timed out while adding phone number to WhatsApp allow list",
+        recipientPhone,
+      );
+      return {
+        success: false,
+        error: "Request to Meta timed out while registering the recipient",
+      };
+    }
+
+    console.error(
+      "Unexpected error while adding phone number to WhatsApp allow list:",
+      recipientPhone,
+      error,
+    );
+    return {
+      success: false,
+      error:
+        error instanceof Error
+          ? error.message
+          : "Unknown error while registering recipient",
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function sendMessage(
   userId: string,
   to: string,
   message: SendMessagePayload,
+  options: SendMessageOptions = {},
 ): Promise<SendMessageResult> {
+  const { allowListAttempted = false } = options;
   const normalizedTo = normalizePhone(to);
 
   if (!normalizedTo) {
@@ -1573,9 +1686,7 @@ export async function sendMessage(
     }
 
     if (!res.ok) {
-      const errorPayload = json as
-        | { error?: { message?: string; error_user_msg?: string } }
-        | undefined;
+      const errorPayload = json as MetaErrorPayload | undefined;
       const graphMessage =
         errorPayload?.error?.error_user_msg ?? errorPayload?.error?.message;
       const fallback = raw || res.statusText || "Meta API request failed";
@@ -1593,6 +1704,49 @@ export async function sendMessage(
       const normalizedError = isAccessTokenError
         ? "Meta access token expired. Please reconnect WhatsApp in Settings."
         : errorMessage;
+
+      const errorCode =
+        typeof errorPayload?.error?.code === "number"
+          ? errorPayload.error.code
+          : null;
+
+      if (
+        res.status === 400 &&
+        errorCode === RECIPIENT_NOT_ALLOWED_ERROR_CODE &&
+        !allowListAttempted
+      ) {
+        console.warn(
+          "Recipient phone number not in WhatsApp allow list. Attempting automatic registration.",
+          normalizedTo,
+        );
+
+        const allowListResult = await addRecipientToAllowList(
+          accessToken,
+          phoneNumberId,
+          normalizedTo,
+        );
+
+        if (allowListResult.success) {
+          return sendMessage(userId, normalizedTo, message, {
+            ...options,
+            allowListAttempted: true,
+          });
+        }
+
+        const registrationError =
+          allowListResult.error ??
+          "Meta rejected the number because it is not in the WhatsApp test allow list. Please add it manually from the Meta Developer Dashboard.";
+
+        return {
+          success: false,
+          status: allowListResult.status ?? res.status,
+          error: registrationError,
+          details: {
+            originalError: errorPayload,
+            allowListAttempt: allowListResult.details ?? null,
+          },
+        };
+      }
 
       console.error("Error sending message:", res.status, errorMessage);
       return {
