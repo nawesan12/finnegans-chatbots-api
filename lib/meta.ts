@@ -1307,64 +1307,116 @@ async function addRecipientToAllowList(
   phoneNumberId: string,
   recipientPhone: string,
 ): Promise<AllowListResult> {
-  const url = `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/recipients`;
+  const candidatePaths = ["recipients", "registered_whatsapp_users"] as const;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), META_API_TIMEOUT_MS);
 
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to: recipientPhone,
-      }),
-      signal: controller.signal,
-    });
+    let lastError: AllowListResult | null = null;
 
-    const raw = await response.text().catch(() => "");
-    let json: unknown;
+    for (const path of candidatePaths) {
+      const url = `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/${path}`;
 
-    if (raw) {
       try {
-        json = JSON.parse(raw);
-      } catch {
-        json = undefined;
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            messaging_product: "whatsapp",
+            to: recipientPhone,
+          }),
+          signal: controller.signal,
+        });
+
+        const raw = await response.text().catch(() => "");
+        let json: unknown;
+
+        if (raw) {
+          try {
+            json = JSON.parse(raw);
+          } catch {
+            json = undefined;
+          }
+        }
+
+        if (!response.ok) {
+          const payload = json as MetaErrorPayload | undefined;
+          const message =
+            payload?.error?.error_user_msg?.trim() ||
+            payload?.error?.message?.trim() ||
+            raw ||
+            response.statusText ||
+            "Failed to add phone number to WhatsApp test allow list";
+
+          console.error(
+            "Failed to add phone number to WhatsApp allow list:",
+            response.status,
+            message,
+          );
+
+          const normalizedMessage =
+            typeof message === "string" ? message.toLowerCase() : "";
+          const isFallbackCandidate =
+            (response.status === 400 || response.status === 404) &&
+            (normalizedMessage.includes("unknown path components") ||
+              normalizedMessage.includes("unsupported post request"));
+
+          if (isFallbackCandidate) {
+            console.warn(
+              `Meta rejected allow list endpoint "${path}". Trying alternative endpoint...`,
+            );
+            lastError = {
+              success: false,
+              status: response.status,
+              error: message,
+              details: payload ?? json ?? raw,
+            };
+            continue;
+          }
+
+          return {
+            success: false,
+            status: response.status,
+            error: message,
+            details: payload ?? json ?? raw,
+          };
+        }
+
+        console.info(
+          "Successfully added phone number to WhatsApp allow list:",
+          recipientPhone,
+        );
+
+        return { success: true, details: json ?? raw };
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+          throw error;
+        }
+
+        console.error(
+          "Unexpected error while calling Meta allow list endpoint:",
+          path,
+          error,
+        );
+        lastError = {
+          success: false,
+          error:
+            error instanceof Error
+              ? error.message
+              : "Unknown error while registering recipient",
+        };
       }
     }
 
-    if (!response.ok) {
-      const payload = json as MetaErrorPayload | undefined;
-      const message =
-        payload?.error?.error_user_msg?.trim() ||
-        payload?.error?.message?.trim() ||
-        raw ||
-        response.statusText ||
-        "Failed to add phone number to WhatsApp test allow list";
-
-      console.error(
-        "Failed to add phone number to WhatsApp allow list:",
-        response.status,
-        message,
-      );
-
-      return {
+    return (
+      lastError ?? {
         success: false,
-        status: response.status,
-        error: message,
-        details: payload ?? json ?? raw,
-      };
-    }
-
-    console.info(
-      "Successfully added phone number to WhatsApp allow list:",
-      recipientPhone,
+        error: "Meta did not accept any allow list endpoints",
+      }
     );
-
-    return { success: true, details: json ?? raw };
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       console.error(
