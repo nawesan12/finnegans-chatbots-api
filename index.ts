@@ -1,10 +1,11 @@
-import express, { type Request, type Response, type NextFunction } from "express";
+import express, {
+  type Request,
+  type Response,
+  type NextFunction,
+} from "express";
 import { ZodError } from "zod";
 
-import {
-  processWebhookEvent,
-  processManualFlowTrigger,
-} from "./lib/meta";
+import { processWebhookEvent, processManualFlowTrigger } from "./lib/meta";
 import type {
   ManualFlowTriggerOptions,
   ManualFlowTriggerResult,
@@ -79,11 +80,8 @@ const sanitizeIncomingMeta = (
   const interactive = isRecord(interactiveRaw)
     ? {
         type:
-          typeof interactiveRaw.type === "string"
-            ? interactiveRaw.type
-            : null,
-        id:
-          typeof interactiveRaw.id === "string" ? interactiveRaw.id : null,
+          typeof interactiveRaw.type === "string" ? interactiveRaw.type : null,
+        id: typeof interactiveRaw.id === "string" ? interactiveRaw.id : null,
         title:
           typeof interactiveRaw.title === "string"
             ? interactiveRaw.title
@@ -121,9 +119,7 @@ const handleFlowRouteError = (
 ) => {
   if (error instanceof ZodError) {
     const message =
-      error.issues?.[0]?.message ??
-      error.message ??
-      "Invalid flow payload";
+      error.issues?.[0]?.message ?? error.message ?? "Invalid flow payload";
     res.status(400).json({ success: false, error: message });
     return;
   }
@@ -230,80 +226,79 @@ app.post<
     >,
     res: Response<ManualFlowTriggerResult>,
   ) => {
-  const { flowId } = req.params;
+    const { flowId } = req.params;
 
-  if (!flowId) {
-    res
-      .status(400)
-      .json({ success: false, error: "Flow ID is required", status: 400 });
-    return;
-  }
-
-  const { from, message, name, variables, incomingMeta } =
-    req.body ?? {};
-
-  if (typeof from !== "string" || !from.trim()) {
-    res.status(400).json({
-      success: false,
-      error: 'Field "from" must be a non-empty string',
-      status: 400,
-    });
-    return;
-  }
-
-  if (typeof message !== "string" && typeof message !== "undefined") {
-    res.status(400).json({
-      success: false,
-      error: 'Field "message" must be a string',
-      status: 400,
-    });
-    return;
-  }
-
-  if (typeof name !== "undefined" && typeof name !== "string") {
-    res.status(400).json({
-      success: false,
-      error: 'Field "name" must be a string when provided',
-      status: 400,
-    });
-    return;
-  }
-
-  if (typeof variables !== "undefined" && !isRecord(variables)) {
-    res.status(400).json({
-      success: false,
-      error: 'Field "variables" must be an object when provided',
-      status: 400,
-    });
-    return;
-  }
-
-  const options: ManualFlowTriggerOptions = {
-    flowId,
-    from,
-    message: typeof message === "string" ? message : "",
-    name: typeof name === "string" ? name : null,
-    variables: isRecord(variables) ? variables : null,
-    incomingMeta: sanitizeIncomingMeta(incomingMeta),
-  };
-
-  try {
-    const result = await processManualFlowTrigger(options);
-
-    if (result.success) {
-      res.json(result);
+    if (!flowId) {
+      res
+        .status(400)
+        .json({ success: false, error: "Flow ID is required", status: 400 });
       return;
     }
 
-    res.status(result.status ?? 500).json(result);
-  } catch (error) {
-    console.error("Failed to trigger flow manually:", error);
-    res.status(500).json({
-      success: false,
-      error: "Failed to trigger flow",
-      status: 500,
-    });
-  }
+    const { from, message, name, variables, incomingMeta } = req.body ?? {};
+
+    if (typeof from !== "string" || !from.trim()) {
+      res.status(400).json({
+        success: false,
+        error: 'Field "from" must be a non-empty string',
+        status: 400,
+      });
+      return;
+    }
+
+    if (typeof message !== "string" && typeof message !== "undefined") {
+      res.status(400).json({
+        success: false,
+        error: 'Field "message" must be a string',
+        status: 400,
+      });
+      return;
+    }
+
+    if (typeof name !== "undefined" && typeof name !== "string") {
+      res.status(400).json({
+        success: false,
+        error: 'Field "name" must be a string when provided',
+        status: 400,
+      });
+      return;
+    }
+
+    if (typeof variables !== "undefined" && !isRecord(variables)) {
+      res.status(400).json({
+        success: false,
+        error: 'Field "variables" must be an object when provided',
+        status: 400,
+      });
+      return;
+    }
+
+    const options: ManualFlowTriggerOptions = {
+      flowId,
+      from,
+      message: typeof message === "string" ? message : "",
+      name: typeof name === "string" ? name : null,
+      variables: isRecord(variables) ? variables : null,
+      incomingMeta: sanitizeIncomingMeta(incomingMeta),
+    };
+
+    try {
+      const result = await processManualFlowTrigger(options);
+
+      if (result.success) {
+        res.json(result);
+        return;
+      }
+
+      res.status(result.status ?? 500).json(result);
+    } catch (error) {
+      console.error("Failed to trigger flow manually:", error);
+      res.status(500).json({
+        success: false,
+        error: "Failed to trigger flow",
+        status: 500,
+      });
+    }
   },
 );
 
