@@ -128,6 +128,13 @@ export interface MetaWebhookEvent {
   entry?: WAEntry[];
 }
 
+interface WAStandaloneChangeEvent {
+  field?: string;
+  value?: WAChangeValue;
+}
+
+export type MetaWebhookPayload = MetaWebhookEvent | WAStandaloneChangeEvent;
+
 export type ManualFlowTriggerOptions = {
   flowId: string;
   from: string;
@@ -998,50 +1005,87 @@ function extractUserText(msg: WAMessage): string | null {
 }
 
 /* ====== Procesador de Webhook ====== */
-export async function processWebhookEvent(data: MetaWebhookEvent) {
+const extractWebhookChangeValues = (
+  payload: MetaWebhookPayload,
+): WAChangeValue[] => {
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+
+  const changeValues: WAChangeValue[] = [];
+
+  const entries =
+    "entry" in payload && Array.isArray(payload.entry) ? payload.entry : null;
+
+  if (entries?.length) {
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object") continue;
+      const changes = Array.isArray(entry.changes) ? entry.changes : [];
+      for (const change of changes) {
+        const value = change?.value;
+        if (value && typeof value === "object") {
+          changeValues.push(value as WAChangeValue);
+        }
+      }
+    }
+
+    return changeValues;
+  }
+
+  const standaloneValue =
+    "value" in payload && payload.value && typeof payload.value === "object"
+      ? payload.value
+      : null;
+
+  if (standaloneValue) {
+    changeValues.push(standaloneValue as WAChangeValue);
+  }
+
+  return changeValues;
+};
+
+export async function processWebhookEvent(data: MetaWebhookPayload) {
   if (process.env.NODE_ENV === "development") {
     console.log("Received webhook event:", JSON.stringify(data, null, 2));
   } else {
     console.log("Received webhook event.");
   }
 
-  // sanity checks
-  if (data.object !== "whatsapp_business_account" || !data.entry?.length) {
-    console.warn("Invalid webhook event object or empty entries.");
+  const changeValues = extractWebhookChangeValues(data);
+
+  if (!changeValues.length) {
+    console.warn("Received webhook event without changes to process.");
     return;
   }
 
-  for (const entry of data.entry ?? []) {
-    for (const change of entry.changes ?? []) {
-      const val = change?.value;
-      const phoneNumberId = val?.metadata?.phone_number_id;
-      if (!phoneNumberId) continue;
+  for (const val of changeValues) {
+    const phoneNumberId = val?.metadata?.phone_number_id;
+    if (!phoneNumberId) continue;
 
-      // Resolvemos el “owner” del número
-      const user = await resolveUserForPhoneNumber(phoneNumberId);
-      if (!user) {
-        console.error("User not found for phone number ID:", phoneNumberId);
-        continue;
-      }
+    // Resolvemos el “owner” del número
+    const user = await resolveUserForPhoneNumber(phoneNumberId);
+    if (!user) {
+      console.error("User not found for phone number ID:", phoneNumberId);
+      continue;
+    }
 
-      const statuses = Array.isArray(val?.statuses) ? val.statuses : [];
-      if (statuses.length) {
-        await processBroadcastStatuses(user.id, statuses);
-      }
+    const statuses = Array.isArray(val?.statuses) ? val.statuses : [];
+    if (statuses.length) {
+      await processBroadcastStatuses(user.id, statuses);
+    }
 
-      const messages = Array.isArray(val?.messages) ? val.messages : [];
-      if (!messages.length) continue;
+    const messages = Array.isArray(val?.messages) ? val.messages : [];
+    if (!messages.length) continue;
 
-      const contactIndex = indexWhatsappContacts(val?.contacts);
+    const contactIndex = indexWhatsappContacts(val?.contacts);
 
-      // Procesamos cada mensaje (Meta puede agruparlos)
-      for (const msg of messages) {
-        try {
-          const profile = msg.from ? contactIndex.get(msg.from) : undefined;
-          await handleIncomingWhatsappMessage(user.id, msg, profile);
-        } catch (error) {
-          console.error(`Unhandled error processing message ${msg.id}:`, error);
-        }
+    // Procesamos cada mensaje (Meta puede agruparlos)
+    for (const msg of messages) {
+      try {
+        const profile = msg.from ? contactIndex.get(msg.from) : undefined;
+        await handleIncomingWhatsappMessage(user.id, msg, profile);
+      } catch (error) {
+        console.error(`Unhandled error processing message ${msg.id}:`, error);
       }
     }
   }
