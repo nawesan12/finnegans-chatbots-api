@@ -9,7 +9,7 @@ import { processWebhookEvent, processManualFlowTrigger } from "./lib/meta";
 import type {
   ManualFlowTriggerOptions,
   ManualFlowTriggerResult,
-  MetaWebhookEvent,
+  MetaWebhookPayload,
 } from "./lib/meta";
 import {
   createFlowForUser,
@@ -142,7 +142,7 @@ const handleFlowRouteError = (
 };
 
 app.post("/meta/webhook", async (req: Request, res: Response) => {
-  const payload = req.body as MetaWebhookEvent | undefined;
+  const payload = req.body as MetaWebhookPayload | undefined;
 
   if (!payload || typeof payload !== "object") {
     res.status(400).json({ error: "Invalid webhook payload" });
