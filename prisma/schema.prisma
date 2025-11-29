@@ -20,9 +20,11 @@ model User {
   metaPhoneNumberId     String?
   metaVerifyToken       String?
   metaBusinessAccountId String?
+  metaPhonePin          String?
   broadcasts            Broadcast[]
   contacts              Contact[]
   flows                 Flow[]
+  Message               Message[]
 }
 
 model Contact {
@@ -36,6 +38,7 @@ model Contact {
   broadcastRecipients BroadcastRecipient[]
   user                User                 @relation(fields: [userId], references: [id])
   logs                Log[]
+  Message             Message[]
   sessions            Session[]
   tags                TagsOnContacts[]
 }
@@ -90,16 +93,17 @@ model Log {
 }
 
 model Session {
-  id            String   @id @default(cuid())
-  status        String   @default("Active")
+  id            String    @id @default(cuid())
+  status        String    @default("Active")
   currentNodeId String?
   context       Json?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
   contactId     String
   flowId        String
-  contact       Contact  @relation(fields: [contactId], references: [id])
-  flow          Flow     @relation(fields: [flowId], references: [id])
+  Message       Message[]
+  contact       Contact   @relation(fields: [contactId], references: [id])
+  flow          Flow      @relation(fields: [flowId], references: [id])
 
   @@unique([contactId, flowId])
 }
@@ -149,4 +153,27 @@ model Lead {
   updatedAt DateTime @updatedAt
   notes     String?
   focusArea String?
+}
+
+model Message {
+  id              String    @id
+  waMessageId     String?   @unique
+  direction       String
+  type            String    @default("text")
+  content         String?
+  payload         Json?
+  status          String    @default("Pending")
+  error           String?
+  statusUpdatedAt DateTime?
+  createdAt       DateTime  @default(now())
+  contactId       String
+  userId          String
+  sessionId       String?
+  Contact         Contact   @relation(fields: [contactId], references: [id])
+  Session         Session?  @relation(fields: [sessionId], references: [id])
+  User            User      @relation(fields: [userId], references: [id])
+
+  @@index([contactId, createdAt])
+  @@index([userId, createdAt])
+  @@index([waMessageId])
 }

@@ -1,11 +1,11 @@
-import express, {
-  type Request,
-  type Response,
-  type NextFunction,
-} from "express";
+import express from "express";
+import type { Request, Response, NextFunction } from "express";
 import { ZodError } from "zod";
+import crypto from "node:crypto";
+import http from "node:http";
 
-import { processWebhookEvent, processManualFlowTrigger } from "./lib/meta";
+import { processWebhookEvent, processManualFlowTrigger } from "./lib/meta.js";
+import { initializeSocketServer } from "./lib/socket.js";
 import type {
   ManualFlowTriggerOptions,
   ManualFlowTriggerResult,
@@ -33,6 +33,10 @@ type FlowSuccessResponse = { success: true; flow: FlowResource };
 type FlowErrorResponse = { success: false; error: string };
 
 const app = express();
+const httpServer = http.createServer(app as never);
+
+// Initialize WebSocket server
+initializeSocketServer(httpServer);
 
 app.use(express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ extended: true }));
@@ -42,6 +46,25 @@ const VERIFY_TOKEN =
   process.env.WHATSAPP_VERIFY_TOKEN ??
   process.env.VERIFY_TOKEN ??
   "";
+
+const APP_SECRET =
+  process.env.META_APP_SECRET ??
+  process.env.WHATSAPP_APP_SECRET ??
+  "";
+
+function verifyWebhookSignature(body: unknown, signature: string): boolean {
+  if (!APP_SECRET) {
+    console.warn("META_APP_SECRET not configured - webhook signature verification disabled");
+    return true;
+  }
+
+  const hash = crypto
+    .createHmac("sha256", APP_SECRET)
+    .update(JSON.stringify(body))
+    .digest("hex");
+
+  return signature === `sha256=${hash}`;
+}
 
 app.get("/health", (_req: Request, res: Response) => {
   res.json({ status: "ok" });
@@ -141,11 +164,19 @@ const handleFlowRouteError = (
   res.status(500).json({ success: false, error: "Failed to persist flow" });
 };
 
-app.post("/meta/webhook", async (req: Request, res: Response) => {
+app.post("/meta/webhook", async (req, res) => {
   const payload = req.body as MetaWebhookPayload | undefined;
 
   if (!payload || typeof payload !== "object") {
     res.status(400).json({ error: "Invalid webhook payload" });
+    return;
+  }
+
+  // Verify webhook signature
+  const signature = (req.headers?.["x-hub-signature-256"] as string) || "";
+  if (APP_SECRET && (!signature || !verifyWebhookSignature(payload, signature))) {
+    console.error("Invalid webhook signature");
+    res.status(403).json({ error: "Invalid signature" });
     return;
   }
 
@@ -313,8 +344,16 @@ const portRaw = process.env.PORT ?? process.env.APP_PORT ?? "3000";
 const port = Number.parseInt(portRaw, 10);
 const listenPort = Number.isFinite(port) ? port : 3000;
 
+const wsPortRaw = process.env.WEBSOCKET_PORT ?? process.env.WS_PORT ?? "3001";
+const wsPort = Number.parseInt(wsPortRaw, 10);
+const wsListenPort = Number.isFinite(wsPort) ? wsPort : 3001;
+
 app.listen(listenPort, () => {
-  console.log(`Server listening on port ${listenPort}`);
+  console.log(`Webhook server listening on port ${listenPort}`);
+});
+
+httpServer.listen(wsListenPort, () => {
+  console.log(`WebSocket server listening on port ${wsListenPort}`);
 });
 
 process.on("unhandledRejection", (reason) => {

@@ -8,6 +8,7 @@ declare module "express" {
     params: Params;
     body: ReqBody;
     query: ReqQuery;
+    headers: Record<string, string | string[] | undefined>;
   }
 
   export interface Response<ResBody = unknown> {

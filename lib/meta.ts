@@ -7,6 +7,12 @@ import type {
 
 import prisma from "./prisma";
 import { executeFlow, FlowSendMessageError } from "./flow-executor";
+import {
+  emitMessageNew,
+  emitTypingStart,
+  emitTypingStop,
+  emitMessageStatus,
+} from "./socket";
 
 type SessionWithRelations = PrismaSession & {
   flow: Flow;
@@ -756,6 +762,45 @@ async function handleIncomingWhatsappMessage(
     return;
   }
 
+  // Save incoming message to database
+  let savedMessage;
+  try {
+    savedMessage = await prisma.message.create({
+      data: {
+        id: `incoming_${message.id}`,
+        waMessageId: message.id,
+        direction: "in",
+        type: message.type ?? "text",
+        content: text,
+        payload: {
+          from,
+          text: textRaw,
+          interactive: message.interactive
+            ? {
+                type: message.interactive.type ?? null,
+                buttonReply: message.interactive.button_reply ?? null,
+                listReply: message.interactive.list_reply ?? null,
+              }
+            : null,
+          image: message.image ?? null,
+          video: message.video ?? null,
+          audio: message.audio ?? null,
+          document: message.document ?? null,
+          sticker: message.sticker ?? null,
+        },
+        status: "Received",
+        contactId: contact.id,
+        userId,
+      },
+    });
+
+    // Emit WebSocket event for new message
+    emitMessageNew(contact.id, savedMessage);
+  } catch (error) {
+    console.error(`Failed to save incoming message ${message.id}:`, error);
+    // Continue processing even if saving fails
+  }
+
   const existingSession = (await prisma.session.findFirst({
     where: {
       contactId: contact.id,
@@ -817,6 +862,20 @@ async function handleIncomingWhatsappMessage(
     return;
   }
 
+  // Update incoming message with session ID
+  try {
+    await prisma.message.update({
+      where: { id: `incoming_${message.id}` },
+      data: { sessionId: session.id },
+    });
+  } catch (error) {
+    console.error(
+      `Failed to update message ${message.id} with session ID:`,
+      error,
+    );
+    // Continue processing even if update fails
+  }
+
   const incomingMeta = {
     type: message.type ?? null,
     rawText: message.text?.body ?? textRaw ?? null,
@@ -840,11 +899,18 @@ async function handleIncomingWhatsappMessage(
     sticker: toRecordIfObject(message.sticker),
   };
 
+  // Emit typing indicator before flow execution
+  emitTypingStart(contact.id);
+
   try {
     await executeFlow(
       session,
       text,
-      (uid, to, payload) => sendMessage(uid, to, payload),
+      (uid, to, payload) =>
+        sendMessage(uid, to, payload, {
+          contactId: contact.id,
+          sessionId: session.id,
+        }),
       incomingMeta,
     );
   } catch (error) {
@@ -861,12 +927,96 @@ async function handleIncomingWhatsappMessage(
       );
     }
   } finally {
+    // Stop typing indicator after flow execution
+    emitTypingStop(contact.id);
+
     try {
       await recordSessionSnapshot(session.id);
     } catch (snapshotError) {
       console.error(
         `Failed to record session snapshot for ${session.id}:`,
         snapshotError,
+      );
+    }
+  }
+}
+
+async function processMessageStatuses(userId: string, statuses: WAStatus[]) {
+  for (const status of statuses) {
+    if (!status) continue;
+
+    const messageId =
+      typeof status.id === "string" && status.id.trim().length > 0
+        ? status.id.trim()
+        : null;
+
+    if (!messageId) continue;
+
+    try {
+      // Try to find the message in the Message table
+      const message = await prisma.message.findFirst({
+        where: {
+          waMessageId: messageId,
+          userId,
+        },
+        select: { id: true, status: true },
+      });
+
+      if (!message) {
+        // Message not found in regular messages, skip
+        continue;
+      }
+
+      const nextStatus = mapWhatsappStatus(status.status ?? null);
+      const statusTimestamp = parseStatusTimestamp(status.timestamp ?? null);
+
+      const updateData: {
+        statusUpdatedAt: Date;
+        status?: string;
+        error?: string | null;
+      } = {
+        statusUpdatedAt: statusTimestamp ?? new Date(),
+      };
+
+      if (nextStatus) {
+        updateData.status = nextStatus;
+        // Clear error if status is successful
+        if (
+          nextStatus === "Sent" ||
+          nextStatus === "Delivered" ||
+          nextStatus === "Read"
+        ) {
+          updateData.error = null;
+        }
+      }
+
+      // Handle errors for failed statuses
+      if (nextStatus === "Failed") {
+        const errorMessage =
+          extractStatusError(status.errors ?? null) ??
+          "Meta reported delivery failure";
+        updateData.error = errorMessage;
+      }
+
+      const updatedMessage = await prisma.message.update({
+        where: { id: message.id },
+        data: updateData,
+      });
+
+      // Emit WebSocket event for message status update
+      if (updatedMessage.waMessageId) {
+        emitMessageStatus(
+          updatedMessage.contactId,
+          updatedMessage.id,
+          updatedMessage.waMessageId,
+          updatedMessage.status,
+        );
+      }
+    } catch (error) {
+      console.error(
+        "Failed to process message status update for message:",
+        messageId,
+        error,
       );
     }
   }
@@ -1071,7 +1221,11 @@ export async function processWebhookEvent(data: MetaWebhookPayload) {
 
     const statuses = Array.isArray(val?.statuses) ? val.statuses : [];
     if (statuses.length) {
-      await processBroadcastStatuses(user.id, statuses);
+      // Process status updates for both regular messages and broadcasts
+      await Promise.all([
+        processMessageStatuses(user.id, statuses),
+        processBroadcastStatuses(user.id, statuses),
+      ]);
     }
 
     const messages = Array.isArray(val?.messages) ? val.messages : [];
@@ -1230,7 +1384,11 @@ export async function processManualFlowTrigger(
     await executeFlow(
       activeSession,
       candidateMessage,
-      (uid, to, payload) => sendMessage(uid, to, payload),
+      (uid, to, payload) =>
+        sendMessage(uid, to, payload, {
+          contactId: contact.id,
+          sessionId: activeSession.id,
+        }),
       incomingMeta,
     );
 
@@ -1329,6 +1487,8 @@ export const META_API_TIMEOUT_MS = 15000;
 
 type SendMessageOptions = {
   allowListAttempted?: boolean;
+  contactId?: string;
+  sessionId?: string;
 };
 
 type MetaErrorPayload = {
@@ -1444,7 +1604,7 @@ export async function sendMessage(
   message: SendMessagePayload,
   options: SendMessageOptions = {},
 ): Promise<SendMessageResult> {
-  const { allowListAttempted = false } = options;
+  const { allowListAttempted = false, contactId, sessionId } = options;
   const normalizedTo = normalizePhone(to);
 
   if (!normalizedTo) {
@@ -1772,8 +1932,9 @@ export async function sendMessage(
 
         if (allowListResult.success) {
           return sendMessage(userId, normalizedTo, message, {
-            ...options,
             allowListAttempted: true,
+            contactId,
+            sessionId,
           });
         }
 
@@ -1809,6 +1970,47 @@ export async function sendMessage(
       | undefined;
     const messageId =
       response?.messages?.find((m) => typeof m?.id === "string")?.id ?? null;
+
+    // Save outbound message to database if contactId is provided
+    if (contactId && messageId) {
+      try {
+        const messageContent =
+          message.type === "text"
+            ? message.text
+            : message.type === "options"
+              ? message.text
+              : message.type === "list"
+                ? message.text
+                : message.type === "template"
+                  ? `Template: ${message.template.name}`
+                  : message.type === "media"
+                    ? message.caption || `[${message.mediaType}]`
+                    : message.type === "flow"
+                      ? message.flow.body
+                      : null;
+
+        const savedMessage = await prisma.message.create({
+          data: {
+            id: `outbound_${messageId}`,
+            waMessageId: messageId,
+            direction: "out",
+            type: message.type,
+            content: messageContent,
+            payload: message,
+            status: "Sent",
+            contactId,
+            userId,
+            sessionId: sessionId ?? null,
+          },
+        });
+
+        // Emit WebSocket event for new outbound message
+        emitMessageNew(contactId, savedMessage);
+      } catch (error) {
+        console.error(`Failed to save outbound message ${messageId}:`, error);
+        // Don't fail the send operation if saving fails
+      }
+    }
 
     return { success: true, messageId };
   } catch (error) {
