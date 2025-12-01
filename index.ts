@@ -344,16 +344,11 @@ const portRaw = process.env.PORT ?? process.env.APP_PORT ?? "3000";
 const port = Number.parseInt(portRaw, 10);
 const listenPort = Number.isFinite(port) ? port : 3000;
 
-const wsPortRaw = process.env.WEBSOCKET_PORT ?? process.env.WS_PORT ?? "3001";
-const wsPort = Number.parseInt(wsPortRaw, 10);
-const wsListenPort = Number.isFinite(wsPort) ? wsPort : 3001;
-
-app.listen(listenPort, () => {
-  console.log(`Webhook server listening on port ${listenPort}`);
-});
-
-httpServer.listen(wsListenPort, () => {
-  console.log(`WebSocket server listening on port ${wsListenPort}`);
+// Start unified HTTP server (handles both Express routes and WebSocket)
+httpServer.listen(listenPort, () => {
+  console.log(`Server listening on port ${listenPort}`);
+  console.log(`  - HTTP API endpoints available`);
+  console.log(`  - WebSocket server ready for connections`);
 });
 
 process.on("unhandledRejection", (reason) => {
