@@ -60,6 +60,7 @@ export const MessageDataSchema = BaseDataSchema.extend({
 });
 
 export const OptionsDataSchema = BaseDataSchema.extend({
+  text: z.string().max(waTextLimit).default(""),
   options: z.array(z.string().min(1).max(30)).min(2).max(10),
 });
 
@@ -96,7 +97,7 @@ export const MediaDataSchema = BaseDataSchema.extend({
   url: z.string().url().optional(),
   id: z.string().min(1).optional(),
   caption: z.string().max(1024).optional(),
-}).superRefine((data, ctx) => {
+}).superRefine((data: { url?: string; id?: string }, ctx: z.RefinementCtx) => {
   if (!data.url && !data.id) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -223,7 +224,7 @@ const parseFlowInput = (input: unknown): unknown => {
 
 export const sanitizeFlowDefinition = (input: unknown): FlowDefinition => {
   const parsed = FlowDefinitionSchema.parse(parseFlowInput(input));
-  const nodes = parsed.nodes.map((node) => {
+  const nodes = parsed.nodes.map((node: FlowNodePayload) => {
     const clone = deepClone(node);
     const position = isPlainObject(clone.position) ? clone.position : {};
     return {
@@ -238,7 +239,7 @@ export const sanitizeFlowDefinition = (input: unknown): FlowDefinition => {
     };
   });
 
-  const edges = parsed.edges.map((edge) => {
+  const edges = parsed.edges.map((edge: FlowEdgePayload) => {
     const clone = deepClone(edge);
     const normalizeHandle = (handle: unknown) => {
       if (typeof handle === "string") return handle;
