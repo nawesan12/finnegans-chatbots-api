@@ -31,7 +31,7 @@ export const MessageDataSchema = BaseDataSchema.extend({
   templateName: z.string().max(512).optional(),
   templateLanguage: z.string().max(24).optional(),
   templateParameters: z.array(TemplateParameterSchema).default([]),
-}).superRefine((value, ctx) => {
+}).superRefine((value: { useTemplate: boolean; templateName?: string; templateLanguage?: string; text?: string }, ctx: z.RefinementCtx) => {
   if (value.useTemplate) {
     if (!value.templateName?.trim()) {
       ctx.addIssue({
